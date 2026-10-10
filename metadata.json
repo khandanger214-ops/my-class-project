@@ -1,0 +1,8 @@
+{
+  "name": "LIFE — Logical Intelligence \u0026 Foresight Engine",
+  "description": "Proactive decision intelligence and pathway architecture. Life is complicated. Figuring it out shouldn\u0027t be.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

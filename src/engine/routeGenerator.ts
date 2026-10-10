@@ -1,0 +1,168 @@
+import { RouteData, RouteStep, LifeLensHandoffContext } from '../types/route';
+import { WhyThisResult } from '../types/decision';
+import { ROUTE_TEMPLATES } from '../data/routeTemplates';
+import { classifyScenario } from './classifier';
+import { TEMPLATES } from './templates';
+
+export function generateRouteForScenario(
+  scenarioText: string,
+  handoffContext?: LifeLensHandoffContext
+): RouteData {
+  const normalized = scenarioText.toLowerCase();
+
+  // Match category
+  let categoryKey = 'general-decision';
+  if (normalized.includes('document') || normalized.includes('renew') || normalized.includes('passport') || normalized.includes('license')) {
+    categoryKey = 'document-renewal';
+  } else {
+    const classification = classifyScenario(scenarioText);
+    if (ROUTE_TEMPLATES[classification.category]) {
+      categoryKey = classification.category;
+    }
+  }
+
+  const template = ROUTE_TEMPLATES[categoryKey] || ROUTE_TEMPLATES['general-decision'];
+  const decisionTemplate = TEMPLATES[categoryKey as keyof typeof TEMPLATES] || TEMPLATES['general-decision'];
+
+  const isDemo = handoffContext?.scenarioSourceType === 'bundled-demo';
+  const routeSourceType = isDemo ? 'bundled-demo' : 'rule-engine';
+
+  // Deep clone template with explicit provenance labels
+  const clonedSteps: RouteStep[] = template.steps.map(s => ({
+    ...s,
+    prerequisiteStepIds: [...s.prerequisiteStepIds],
+    requiredDocuments: [...s.requiredDocuments],
+    potentialBlockers: [...s.potentialBlockers],
+    isCompleted: false,
+    userNotes: '',
+    sourceType: routeSourceType
+  }));
+
+  let goal = template.goal;
+  let desiredOutcome = template.desiredOutcome;
+  let title = template.title;
+
+  const factorsConsidered: string[] = [
+    `Process domain classified as "${template.categoryLabel}" by local deterministic matcher`,
+    `Sequenced ${clonedSteps.length} dependent milestones across ${new Set(clonedSteps.map(s => s.phaseNumber)).size} operational phases`,
+    `Prerequisite dependency chain enforced so downstream steps flag missing upstream verifications`
+  ];
+
+  // Weave handoff context if transferred from LifeLens
+  if (handoffContext) {
+    if (handoffContext.userGoal && handoffContext.userGoal.trim().length > 0) {
+      goal = handoffContext.userGoal.trim();
+      factorsConsidered.push(`Incorporated user-defined objective: "${goal}"`);
+    }
+    if (handoffContext.selectedOptionName) {
+      desiredOutcome = `${template.desiredOutcome} Aligned with selected strategy: ${handoffContext.selectedOptionName}.`;
+      factorsConsidered.push(`Aligned pathway with chosen strategy option: "${handoffContext.selectedOptionName}"`);
+    }
+
+    // Attach constraint and priority hints to relevant steps
+    if (handoffContext.constraints && handoffContext.constraints.length > 0) {
+      const budgetConstraint = handoffContext.constraints.find(c => c.label.toLowerCase().includes('budget') || c.label.toLowerCase().includes('cost') || c.label.toLowerCase().includes('cap') || c.label.toLowerCase().includes('ceiling'));
+      const timelineConstraint = handoffContext.constraints.find(c => c.label.toLowerCase().includes('time') || c.label.toLowerCase().includes('date') || c.label.toLowerCase().includes('horizon') || c.label.toLowerCase().includes('start') || c.label.toLowerCase().includes('notice'));
+
+      if (budgetConstraint && clonedSteps.length > 0) {
+        clonedSteps[0].userNotes = `Boundary constraint: ${budgetConstraint.label} (${budgetConstraint.value})`;
+      }
+      if (timelineConstraint && clonedSteps.length > 1) {
+        clonedSteps[1].userNotes = `Boundary constraint: ${timelineConstraint.label} (${timelineConstraint.value})`;
+      }
+      factorsConsidered.push(`Mapped ${handoffContext.constraints.length} active constraint boundaries into step guidance`);
+    }
+  }
+
+  const activeStakeholders = (handoffContext?.stakeholders || []).filter(s => s.isIncluded);
+  if (activeStakeholders.length > 0) {
+    factorsConsidered.push(`Included ${activeStakeholders.length} user-enabled stakeholder consideration(s): ${activeStakeholders.map(s => s.roleOrGroup).join(', ')}`);
+  }
+
+  const whyThisRoute: WhyThisResult = {
+    factorsConsidered,
+    userPriorities: handoffContext?.priorities || [],
+    assumptionsMade: decisionTemplate
+      ? [...decisionTemplate.whyThisResult.assumptionsMade]
+      : [
+          'Assumes standard administrative processing timelines and baseline statutory prerequisites.',
+          'Assumes no third-party co-signers, family members, or employers are involved unless explicitly added.'
+        ],
+    unknownsIdentified: [
+      'Exact municipal or agency appointment backlogs at your local filing office',
+      'Counterparty turnaround time for written addenda or document verification',
+      ...(decisionTemplate ? decisionTemplate.whyThisResult.unknownsIdentified.slice(0, 2) : [])
+    ],
+    limitations: [
+      'Generated by a local rule-based pathway template engine; no live government database or external API was queried.',
+      'Estimated costs and durations are illustrative ranges and must be verified with the issuing institution or counterparty.',
+      'Supports pathway organization only and does not constitute legal, tax, financial, or official regulatory advice.'
+    ],
+    suggestedVerifications: clonedSteps.map(s => s.verificationCheck)
+  };
+
+  const initialStakeholders =
+    handoffContext?.stakeholders && handoffContext.stakeholders.length > 0
+      ? handoffContext.stakeholders.map(s => ({ ...s }))
+      : decisionTemplate?.optionalStakeholders
+      ? decisionTemplate.optionalStakeholders.map(s => ({ ...s }))
+      : [];
+
+  return {
+    id: `route-${Date.now()}`,
+    scenarioStatement: scenarioText.trim(),
+    category: template.category,
+    categoryLabel: template.categoryLabel,
+    title,
+    goal,
+    goalSourceType: handoffContext?.goalSourceType || routeSourceType,
+    desiredOutcome,
+    totalEstimatedDuration: template.totalEstimatedDuration,
+    sourceIntegrityNotice: template.sourceIntegrityNotice,
+    whyThisRoute,
+    stakeholders: initialStakeholders,
+    flaggedAssumptions: handoffContext?.flaggedAssumptions || [],
+    userDecisionStance: handoffContext?.userDecisionStance || 'investigating',
+    userDecisionNote: handoffContext?.userDecisionNote || '',
+    steps: clonedSteps
+  };
+}
+
+export function checkPrerequisites(
+  step: RouteStep,
+  allSteps: RouteStep[]
+): { isMet: boolean; missingStepNumbers: number[]; missingStepTitles: string[] } {
+  if (!step.prerequisiteStepIds || step.prerequisiteStepIds.length === 0) {
+    return { isMet: true, missingStepNumbers: [], missingStepTitles: [] };
+  }
+
+  const missingSteps = step.prerequisiteStepIds
+    .map(id => allSteps.find(s => s.id === id))
+    .filter((s): s is RouteStep => s !== undefined && !s.isCompleted);
+
+  return {
+    isMet: missingSteps.length === 0,
+    missingStepNumbers: missingSteps.map(s => s.stepNumber),
+    missingStepTitles: missingSteps.map(s => s.title)
+  };
+}
+
+export function calculateRouteProgress(steps: RouteStep[]) {
+  const total = steps.length;
+  const completed = steps.filter(s => s.isCompleted).length;
+  const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  const incompleteSteps = steps.filter(s => !s.isCompleted);
+  const blockedSteps = incompleteSteps.filter(s => {
+    const prereq = checkPrerequisites(s, steps);
+    return !prereq.isMet;
+  });
+
+  return {
+    total,
+    completed,
+    percentage,
+    incompleteSteps,
+    blockedSteps
+  };
+}
